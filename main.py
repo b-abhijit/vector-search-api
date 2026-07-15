@@ -1,29 +1,32 @@
 import csv
 import json
 import math
+from pathlib import Path
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Any, Dict, List
 
 app = FastAPI()
 
-# ---------- Load data once when server starts ----------
-with open("documents.csv", "r", encoding="utf-8") as f:
+BASE_DIR = Path(__file__).resolve().parent
+DOCUMENTS_PATH = BASE_DIR / "documents.csv"
+EMBEDDINGS_PATH = BASE_DIR / "embeddings.json"
+RERANKER_PATH = BASE_DIR / "reranker_scores.json"
+
+with open(DOCUMENTS_PATH, "r", encoding="utf-8") as f:
     reader = csv.DictReader(f)
     documents = list(reader)
 
-with open("embeddings.json", "r", encoding="utf-8") as f:
+with open(EMBEDDINGS_PATH, "r", encoding="utf-8") as f:
     embeddings = json.load(f)
 
-with open("reranker_scores.json", "r", encoding="utf-8") as f:
+with open(RERANKER_PATH, "r", encoding="utf-8") as f:
     reranker_scores = json.load(f)
 
-# Convert numeric fields if needed
 for doc in documents:
     if "year" in doc:
         doc["year"] = int(doc["year"])
 
-# ---------- Request model ----------
 class VectorSearchRequest(BaseModel):
     query_id: str
     query_vector: List[float]
@@ -31,7 +34,6 @@ class VectorSearchRequest(BaseModel):
     rerank_top_n: int
     filter: Dict[str, Any]
 
-# ---------- Helper functions ----------
 def matches_filter(doc: Dict[str, Any], filters: Dict[str, Any]) -> bool:
     for field, condition in filters.items():
         if field not in doc:
@@ -49,7 +51,6 @@ def matches_filter(doc: Dict[str, Any], filters: Dict[str, Any]) -> bool:
         else:
             if value != condition:
                 return False
-
     return True
 
 def dot(a: List[float], b: List[float]) -> float:
@@ -64,41 +65,31 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
         return 0.0
     return dot(a, b) / denom
 
-# ---------- Health route ----------
 @app.get("/")
 def home():
     return {"message": "Vector Search API is running"}
 
-# ---------- Main endpoint ----------
 @app.post("/vector-search")
 def vector_search(request: VectorSearchRequest):
-    # 1. Filter documents
     filtered_docs = [doc for doc in documents if matches_filter(doc, request.filter)]
 
-    # 2. Compute cosine similarity for filtered docs
     stage1 = []
     for doc in filtered_docs:
         doc_id = doc["doc_id"]
-
         if doc_id not in embeddings:
             continue
-
         sim = cosine_similarity(request.query_vector, embeddings[doc_id])
         stage1.append((doc_id, sim))
 
-    # Sort descending by similarity, tie-break by smaller doc_id
     stage1_sorted = sorted(stage1, key=lambda x: (-x[1], x[0]))
     top_k_docs = stage1_sorted[:request.top_k]
 
-    # 3. Re-rank using reranker score lookup
     query_scores = reranker_scores.get(request.query_id, {})
     stage2 = []
-
     for doc_id, _ in top_k_docs:
         rerank_score = query_scores.get(doc_id, 0.0)
         stage2.append((doc_id, rerank_score))
 
-    # Sort descending by rerank score, tie-break by smaller doc_id
     stage2_sorted = sorted(stage2, key=lambda x: (-x[1], x[0]))
     final_docs = [doc_id for doc_id, _ in stage2_sorted[:request.rerank_top_n]]
 
